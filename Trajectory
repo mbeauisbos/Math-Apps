@@ -1,158 +1,388 @@
-pip install numpy matplotlib
-
+import streamlit as st
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider, Button, CheckButtons
+import pandas as pd
+import plotly.graph_objects as go
 
-class TrajectorySimulator:
-    def __init__(self):
-        # Initial parameters
-        self.v0 = 25.0      # m/s
-        self.angle = 45.0   # degrees
-        self.h0 = 10.0      # m
-        self.g = 9.81       # m/s^2
-        self.keep_trails = False
-        self.saved_lines = []
-        self.colors = ['#f472b6', '#a78bfa', '#34d399', '#fbbf24', '#fb7185']
-        self.color_idx = 0
+st.set_page_config(page_title="2D Free Fall Trajectory Simulator", layout="wide")
 
-        # Setup figure and styling
-        plt.style.use('dark_background')
-        self.fig, self.ax = plt.subplots(figsize=(10, 6.5))
-        plt.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.35)
-        self.fig.canvas.manager.set_window_title('2D Free Fall Trajectory Simulator')
+# Initialize session state for pinned comparison trails
+if "pinned_trails" not in st.session_state:
+    st.session_state.pinned_trails = []
 
-        # Plot elements
-        self.active_line, = self.ax.plot([], [], color='#38bdf8', lw=2.5, label='Current Trajectory')
-        self.launch_marker, = self.ax.plot([], [], 'o', color='#f8fafc', markeredgecolor='#38bdf8', markersize=8)
-        self.apex_marker, = self.ax.plot([], [], '^', color='#fbbf24', markersize=7, label='Apex')
-        
-        # Telemetry text box inside plot
-        self.telemetry_text = self.ax.text(
-            0.98, 0.95, '', transform=self.ax.transAxes,
-            fontsize=10, verticalalignment='top', horizontalalignment='right',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='#1e293b', edgecolor='#334155', alpha=0.9)
+TRAIL_COLORS = ["#f472b6", "#a78bfa", "#34d399", "#fbbf24", "#fb7185"]
+
+
+def calculate_ideal(v0: float, angle_deg: float, h0: float, g: float, num_points: int = 200):
+    """Analytical kinematic solution without air resistance."""
+    theta = np.radians(angle_deg)
+    vx0 = v0 * np.cos(theta)
+    vy0 = v0 * np.sin(theta)
+
+    discriminant = vy0**2 + 2 * g * h0
+    total_time = (vy0 + np.sqrt(discriminant)) / g
+
+    t = np.linspace(0, total_time, num_points)
+    x = vx0 * t
+    y = np.maximum(0.0, h0 + vy0 * t - 0.5 * g * t**2)
+    vx = np.full_like(t, vx0)
+    vy = vy0 - g * t
+    speed = np.hypot(vx, vy)
+
+    # Apex
+    t_peak = max(0.0, vy0 / g)
+    x_peak = vx0 * t_peak
+    y_peak = h0 + vy0 * t_peak - 0.5 * g * t_peak**2
+
+    return {
+        "t": t,
+        "x": x,
+        "y": y,
+        "vx": vx,
+        "vy": vy,
+        "speed": speed,
+        "x_peak": x_peak,
+        "y_peak": y_peak,
+        "range": float(x[-1]),
+        "total_time": float(total_time),
+        "v_impact": float(speed[-1]),
+    }
+
+
+def calculate_with_drag(
+    v0: float,
+    angle_deg: float,
+    h0: float,
+    g: float,
+    mass: float,
+    cd: float,
+    area: float,
+    rho: float,
+    dt: float = 0.01,
+):
+    """Numerical RK4 integration with quadratic aerodynamic drag: F_d = 0.5 * rho * Cd * A * v^2."""
+    theta = np.radians(angle_deg)
+    vx = v0 * np.cos(theta)
+    vy = v0 * np.sin(theta)
+    x, y, t = 0.0, h0, 0.0
+
+    k = 0.5 * rho * cd * area / mass
+
+    def derivatives(vx_s, vy_s):
+        v = np.hypot(vx_s, vy_s)
+        ax = -k * v * vx_s
+        ay = -g - k * v * vy_s
+        return vx_s, vy_s, ax, ay
+
+    ts, xs, ys, vxs, vys = [t], [x], [y], [vx], [vy]
+
+    # Integrate until projectile hits y <= 0 (with safety cap of 100,000 steps)
+    for _ in range(100_000):
+        dx1, dy1, dvx1, dvy1 = derivatives(vx, vy)
+        dx2, dy2, dvx2, dvy2 = derivatives(vx + 0.5 * dt * dvx1, vy + 0.5 * dt * dvy1)
+        dx3, dy3, dvx3, dvy3 = derivatives(vx + 0.5 * dt * dvx2, vy + 0.5 * dt * dvy2)
+        dx4, dy4, dvx4, dvy4 = derivatives(vx + dt * dvx3, vy + dt * dvy3)
+
+        x_next = x + (dt / 6.0) * (dx1 + 2 * dx2 + 2 * dx3 + dx4)
+        y_next = y + (dt / 6.0) * (dy1 + 2 * dy2 + 2 * dy3 + dy4)
+        vx_next = vx + (dt / 6.0) * (dvx1 + 2 * dvx2 + 2 * dvx3 + dvx4)
+        vy_next = vy + (dt / 6.0) * (dvy1 + 2 * dvy2 + 2 * dvy3 + dvy4)
+        t_next = t + dt
+
+        if y_next <= 0.0 and t > 0:
+            # Linear interpolation for exact ground impact
+            frac = y / (y - y_next) if (y - y_next) != 0 else 1.0
+            x_impact = x + frac * (x_next - x)
+            t_impact = t + frac * dt
+            vx_impact = vx + frac * (vx_next - vx)
+            vy_impact = vy + frac * (vy_next - vy)
+
+            ts.append(t_impact)
+            xs.append(x_impact)
+            ys.append(0.0)
+            vxs.append(vx_impact)
+            vys.append(vy_impact)
+            break
+
+        x, y, vx, vy, t = x_next, y_next, vx_next, vy_next, t_next
+        ts.append(t)
+        xs.append(x)
+        ys.append(y)
+        vxs.append(vx)
+        vys.append(vy)
+
+    t_arr = np.array(ts)
+    x_arr = np.array(xs)
+    y_arr = np.array(ys)
+    vx_arr = np.array(vxs)
+    vy_arr = np.array(vys)
+    speed_arr = np.hypot(vx_arr, vy_arr)
+
+    peak_idx = int(np.argmax(y_arr))
+
+    return {
+        "t": t_arr,
+        "x": x_arr,
+        "y": y_arr,
+        "vx": vx_arr,
+        "vy": vy_arr,
+        "speed": speed_arr,
+        "x_peak": float(x_arr[peak_idx]),
+        "y_peak": float(y_arr[peak_idx]),
+        "range": float(x_arr[-1]),
+        "total_time": float(t_arr[-1]),
+        "v_impact": float(speed_arr[-1]),
+    }
+
+
+# --- Sidebar Controls ---
+st.sidebar.header("Launch Parameters")
+
+v0 = st.sidebar.slider("Initial Velocity v₀ (m/s)", min_value=1.0, max_value=100.0, value=30.0, step=0.5)
+angle = st.sidebar.slider("Launch Angle θ (deg)", min_value=-85.0, max_value=90.0, value=45.0, step=1.0)
+h0 = st.sidebar.slider("Initial Height h₀ (m)", min_value=0.0, max_value=100.0, value=10.0, step=0.5)
+
+planet_presets = {
+    "Earth (9.81 m/s²)": 9.81,
+    "Moon (1.62 m/s²)": 1.62,
+    "Mars (3.72 m/s²)": 3.72,
+    "Jupiter (24.79 m/s²)": 24.79,
+    "Custom": None,
+}
+preset = st.sidebar.selectbox("Gravity Preset", list(planet_presets.keys()))
+if planet_presets[preset] is not None:
+    g = planet_presets[preset]
+else:
+    g = st.sidebar.slider("Custom Gravity g (m/s²)", min_value=0.5, max_value=30.0, value=9.81, step=0.01)
+
+# --- Optional Air Resistance ---
+st.sidebar.divider()
+enable_drag = st.sidebar.checkbox("Enable Air Resistance (Quadratic Drag)", value=False)
+
+if enable_drag:
+    mass = st.sidebar.number_input("Projectile Mass (kg)", min_value=0.01, max_value=1000.0, value=0.145, step=0.05)
+    diameter_cm = st.sidebar.slider("Sphere Diameter (cm)", min_value=1.0, max_value=100.0, value=7.4, step=0.2)
+    cd = st.sidebar.slider("Drag Coefficient (C_d)", min_value=0.05, max_value=1.50, value=0.47, step=0.01)
+    rho = st.sidebar.number_input("Air Density ρ (kg/m³)", min_value=0.0, max_value=5.0, value=1.225, step=0.05)
+    area = np.pi * ((diameter_cm / 100.0) / 2.0) ** 2
+
+# Compute Trajectories
+ideal_traj = calculate_ideal(v0, angle, h0, g)
+
+if enable_drag:
+    active_traj = calculate_with_drag(v0, angle, h0, g, mass, cd, area, rho)
+    active_label = f"Drag: v₀={v0}m/s, θ={angle}°, h₀={h0}m"
+else:
+    active_traj = ideal_traj
+    active_label = f"Ideal: v₀={v0}m/s, θ={angle}°, h₀={h0}m"
+
+# --- Trail Management & Export ---
+st.sidebar.divider()
+col_pin, col_clear = st.sidebar.columns(2)
+if col_pin.button("Pin Curve", use_container_width=True):
+    color = TRAIL_COLORS[len(st.session_state.pinned_trails) % len(TRAIL_COLORS)]
+    st.session_state.pinned_trails.append(
+        {
+            "x": active_traj["x"],
+            "y": active_traj["y"],
+            "range": active_traj["range"],
+            "y_peak": active_traj["y_peak"],
+            "label": active_label,
+            "color": color,
+        }
+    )
+
+if col_clear.button("Clear Trails", use_container_width=True):
+    st.session_state.pinned_trails = []
+
+# CSV Export
+df_export = pd.DataFrame(
+    {
+        "time_s": active_traj["t"],
+        "x_m": active_traj["x"],
+        "y_m": active_traj["y"],
+        "vx_m_s": active_traj["vx"],
+        "vy_m_s": active_traj["vy"],
+        "speed_m_s": active_traj["speed"],
+    }
+)
+st.sidebar.download_button(
+    label="Download Trajectory CSV",
+    data=df_export.to_csv(index=False).encode("utf-8"),
+    file_name="trajectory_data.csv",
+    mime="text/csv",
+    use_container_width=True,
+)
+
+# --- Main Display ---
+st.title("2D Free Fall Trajectory Simulator")
+
+# Live Kinematic Metrics Row (with delta vs ideal when drag is enabled)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric(
+    "Max Range (R)",
+    f"{active_traj['range']:.2f} m",
+    delta=f"{active_traj['range'] - ideal_traj['range']:.2f} m vs vacuum" if enable_drag else None,
+)
+m2.metric(
+    "Max Height (H)",
+    f"{active_traj['y_peak']:.2f} m",
+    delta=f"{active_traj['y_peak'] - ideal_traj['y_peak']:.2f} m vs vacuum" if enable_drag else None,
+)
+m3.metric(
+    "Flight Time (T)",
+    f"{active_traj['total_time']:.2f} s",
+    delta=f"{active_traj['total_time'] - ideal_traj['total_time']:.2f} s vs vacuum" if enable_drag else None,
+)
+m4.metric(
+    "Impact Speed (v_f)",
+    f"{active_traj['v_impact']:.2f} m/s",
+    delta=f"{active_traj['v_impact'] - ideal_traj['v_impact']:.2f} m/s vs vacuum" if enable_drag else None,
+)
+
+# --- Build Plotly Figure with Animation Frames ---
+fig = go.Figure()
+
+# Trace 0: Animated Projectile Marker (updated by frames)
+fig.add_trace(
+    go.Scatter(
+        x=[active_traj["x"][0]],
+        y=[active_traj["y"][0]],
+        mode="markers",
+        name="Projectile",
+        marker=dict(color="#f8fafc", size=12, line=dict(color="#38bdf8", width=2.5)),
+        hoverinfo="skip",
+    )
+)
+
+# Trace 1: Active Trajectory Path
+fig.add_trace(
+    go.Scatter(
+        x=active_traj["x"],
+        y=active_traj["y"],
+        mode="lines",
+        name=active_label,
+        line=dict(color="#38bdf8", width=3.5),
+        customdata=np.column_stack((active_traj["t"], active_traj["speed"])),
+        hovertemplate="x: %{x:.2f} m<br>y: %{y:.2f} m<br>t: %{customdata[0]:.2f} s<br>v: %{customdata[1]:.2f} m/s<extra></extra>",
+    )
+)
+
+# Trace 2: Ideal Vacuum Reference Curve (if drag is active)
+if enable_drag:
+    fig.add_trace(
+        go.Scatter(
+            x=ideal_traj["x"],
+            y=ideal_traj["y"],
+            mode="lines",
+            name="Ideal Vacuum Reference",
+            line=dict(color="#94a3b8", width=2, dash="dot"),
+            hovertemplate="Vacuum x: %{x:.2f} m<br>y: %{y:.2f} m<extra></extra>",
         )
+    )
 
-        self.ax.set_title('2D Free Fall Trajectory (Ideal Projectile Motion)', fontsize=13, pad=12)
-        self.ax.set_xlabel('Horizontal Distance $x$ (m)')
-        self.ax.set_ylabel('Vertical Height $y$ (m)')
-        self.ax.grid(True, linestyle='--', alpha=0.25)
-        self.ax.set_aspect('equal', adjustable='datalim')
+# Apex Marker
+fig.add_trace(
+    go.Scatter(
+        x=[active_traj["x_peak"]],
+        y=[active_traj["y_peak"]],
+        mode="markers",
+        name="Apex",
+        marker=dict(symbol="triangle-up", color="#fbbf24", size=11),
+        hovertemplate=f"Apex: ({active_traj['x_peak']:.2f} m, {active_traj['y_peak']:.2f} m)<extra></extra>",
+    )
+)
 
-        self._setup_widgets()
-        self.update(None)
-
-    def _setup_widgets(self):
-        slider_color = '#1e293b'
-        
-        # Slider axes positions [left, bottom, width, height]
-        ax_v0 = plt.axes([0.22, 0.23, 0.55, 0.03], facecolor=slider_color)
-        ax_ang = plt.axes([0.22, 0.18, 0.55, 0.03], facecolor=slider_color)
-        ax_h0 = plt.axes([0.22, 0.13, 0.55, 0.03], facecolor=slider_color)
-        ax_g = plt.axes([0.22, 0.08, 0.55, 0.03], facecolor=slider_color)
-
-        self.s_v0 = Slider(ax_v0, 'Velocity $v_0$ (m/s)', 1.0, 100.0, valinit=self.v0, valstep=0.5, color='#38bdf8')
-        self.s_ang = Slider(ax_ang, 'Angle $\\theta$ (deg)', -85.0, 90.0, valinit=self.angle, valstep=1.0, color='#38bdf8')
-        self.s_h0 = Slider(ax_h0, 'Height $h_0$ (m)', 0.0, 100.0, valinit=self.h0, valstep=0.5, color='#38bdf8')
-        self.s_g = Slider(ax_g, 'Gravity $g$ (m/s²)', 1.62, 24.79, valinit=self.g, valstep=0.01, color='#38bdf8')
-
-        for s in (self.s_v0, self.s_ang, self.s_h0, self.s_g):
-            s.on_changed(self.update)
-
-        # Checkbutton for keeping trails
-        ax_check = plt.axes([0.81, 0.16, 0.15, 0.10], frameon=False)
-        self.check = CheckButtons(ax_check, ['Keep Trails'], [False])
-        self.check.on_clicked(self.toggle_trails)
-
-        # Save Snapshot & Clear buttons
-        ax_save = plt.axes([0.81, 0.11, 0.14, 0.045])
-        self.btn_save = Button(ax_save, 'Pin Curve', color='#334155', hovercolor='#475569')
-        self.btn_save.on_clicked(self.pin_curve)
-
-        ax_clear = plt.axes([0.81, 0.055, 0.14, 0.045])
-        self.btn_clear = Button(ax_clear, 'Clear Trails', color='#334155', hovercolor='#475569')
-        self.btn_clear.on_clicked(self.clear_trails)
-
-    def calculate_kinematics(self, v0, angle_deg, h0, g):
-        theta = np.radians(angle_deg)
-        vx = v0 * np.cos(theta)
-        vy = v0 * np.sin(theta)
-
-        # Flight time until y = 0
-        discriminant = vy**2 + 2 * g * h0
-        total_time = (vy + np.sqrt(discriminant)) / g
-
-        t = np.linspace(0, total_time, 200)
-        x = vx * t
-        y = np.maximum(0, h0 + vy * t - 0.5 * g * t**2)
-
-        # Peak coordinates
-        t_peak = max(0.0, vy / g)
-        x_peak = vx * t_peak
-        y_peak = h0 + vy * t_peak - 0.5 * g * t_peak**2
-
-        # Final impact speed
-        vy_final = vy - g * total_time
-        v_impact = np.hypot(vx, vy_final)
-
-        return x, y, x_peak, y_peak, total_time, v_impact
-
-    def update(self, _):
-        # If "Keep Trails" is checked, save the previous curve before updating
-        if self.keep_trails and len(self.active_line.get_xdata()) > 0:
-            self.pin_curve(None)
-
-        v0 = self.s_v0.val
-        angle = self.s_ang.val
-        h0 = self.s_h0.val
-        g = self.s_g.val
-
-        x, y, x_peak, y_peak, total_time, v_impact = self.calculate_kinematics(v0, angle, h0, g)
-
-        self.active_line.set_data(x, y)
-        self.launch_marker.set_data([0], [h0])
-        self.apex_marker.set_data([x_peak], [y_peak])
-
-        # Update telemetry readout
-        self.telemetry_text.set_text(
-            f"Range (R):     {x[-1]:.2f} m\n"
-            f"Max Height:    {y_peak:.2f} m\n"
-            f"Flight Time:   {total_time:.2f} s\n"
-            f"Impact Speed:  {v_impact:.2f} m/s"
+# Pinned Comparison Trails
+for idx, trail in enumerate(st.session_state.pinned_trails):
+    fig.add_trace(
+        go.Scatter(
+            x=trail["x"],
+            y=trail["y"],
+            mode="lines",
+            name=f"#{idx + 1}: {trail['label']}",
+            line=dict(color=trail["color"], width=2, dash="dash"),
+            hovertemplate="x: %{x:.2f} m<br>y: %{y:.2f} m<extra></extra>",
         )
+    )
 
-        # Auto-scale axes cleanly across active + saved curves
-        all_x = [x] + [line.get_xdata() for line in self.saved_lines]
-        all_y = [y] + [line.get_ydata() for line in self.saved_lines]
+# Build ~50 evenly spaced animation frames for smooth playback
+frame_indices = np.linspace(0, len(active_traj["x"]) - 1, min(50, len(active_traj["x"])), dtype=int)
+frames = []
+slider_steps = []
 
-        max_x = max(10.0, max(np.max(arr) for arr in all_x) * 1.1)
-        max_y = max(10.0, max(np.max(arr) for arr in all_y) * 1.15)
+for idx in frame_indices:
+    t_val = active_traj["t"][idx]
+    frame_name = f"{t_val:.2f}s"
+    frames.append(
+        go.Frame(
+            data=[go.Scatter(x=[active_traj["x"][idx]], y=[active_traj["y"][idx]])],
+            traces=[0],
+            name=frame_name,
+        )
+    )
+    slider_steps.append(
+        {
+            "args": [[frame_name], {"frame": {"duration": 25, "redraw": False}, "mode": "immediate"}],
+            "label": frame_name,
+            "method": "animate",
+        }
+    )
 
-        self.ax.set_xlim(0, max_x)
-        self.ax.set_ylim(0, max_y)
-        self.fig.canvas.draw_idle()
+fig.frames = frames
 
-    def toggle_trails(self, _):
-        self.keep_trails = not self.keep_trails
+# Unified axis bounds for 1:1 geometric aspect ratio
+all_trajs = st.session_state.pinned_trails + [active_traj, ideal_traj]
+max_x = max(10.0, max(t["range"] for t in all_trajs) * 1.1)
+max_y = max(10.0, max(t["y_peak"] for t in all_trajs) * 1.15)
 
-    def pin_curve(self, _):
-        x = self.active_line.get_xdata()
-        y = self.active_line.get_ydata()
-        if len(x) == 0:
-            return
-        color = self.colors[self.color_idx % len(self.colors)]
-        self.color_idx += 1
-        line, = self.ax.plot(x, y, '--', color=color, lw=1.5, alpha=0.8)
-        self.saved_lines.append(line)
-        self.fig.canvas.draw_idle()
+fig.update_layout(
+    template="plotly_dark",
+    height=600,
+    margin=dict(l=40, r=20, t=40, b=80),
+    xaxis=dict(title="Horizontal Distance x (m)", range=[0, max_x], zeroline=True),
+    yaxis=dict(
+        title="Vertical Height y (m)",
+        range=[0, max_y],
+        scaleanchor="x",
+        scaleratio=1,
+        zeroline=True,
+    ),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    updatemenus=[
+        {
+            "type": "buttons",
+            "showactive": False,
+            "x": 0.0,
+            "y": -0.18,
+            "xanchor": "left",
+            "yanchor": "top",
+            "buttons": [
+                {
+                    "label": "▶ Play",
+                    "method": "animate",
+                    "args": [None, {"frame": {"duration": 25, "redraw": False}, "fromcurrent": True}],
+                },
+                {
+                    "label": "⏸ Pause",
+                    "method": "animate",
+                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                },
+            ],
+        }
+    ],
+    sliders=[
+        {
+            "active": 0,
+            "yanchor": "top",
+            "xanchor": "left",
+            "currentvalue": {"prefix": "Time: ", "visible": True, "xanchor": "right"},
+            "pad": {"b": 10, "t": 35},
+            "len": 0.82,
+            "x": 0.18,
+            "y": -0.12,
+            "steps": slider_steps,
+        }
+    ],
+)
 
-    def clear_trails(self, _):
-        for line in self.saved_lines:
-            line.remove()
-        self.saved_lines.clear()
-        self.update(None)
-
-if __name__ == '__main__':
-    sim = TrajectorySimulator()
-    plt.show()
+st.plotly_chart(fig, use_container_width=True)
