@@ -1,0 +1,158 @@
+pip install numpy matplotlib
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider, Button, CheckButtons
+
+class TrajectorySimulator:
+    def __init__(self):
+        # Initial parameters
+        self.v0 = 25.0      # m/s
+        self.angle = 45.0   # degrees
+        self.h0 = 10.0      # m
+        self.g = 9.81       # m/s^2
+        self.keep_trails = False
+        self.saved_lines = []
+        self.colors = ['#f472b6', '#a78bfa', '#34d399', '#fbbf24', '#fb7185']
+        self.color_idx = 0
+
+        # Setup figure and styling
+        plt.style.use('dark_background')
+        self.fig, self.ax = plt.subplots(figsize=(10, 6.5))
+        plt.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.35)
+        self.fig.canvas.manager.set_window_title('2D Free Fall Trajectory Simulator')
+
+        # Plot elements
+        self.active_line, = self.ax.plot([], [], color='#38bdf8', lw=2.5, label='Current Trajectory')
+        self.launch_marker, = self.ax.plot([], [], 'o', color='#f8fafc', markeredgecolor='#38bdf8', markersize=8)
+        self.apex_marker, = self.ax.plot([], [], '^', color='#fbbf24', markersize=7, label='Apex')
+        
+        # Telemetry text box inside plot
+        self.telemetry_text = self.ax.text(
+            0.98, 0.95, '', transform=self.ax.transAxes,
+            fontsize=10, verticalalignment='top', horizontalalignment='right',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='#1e293b', edgecolor='#334155', alpha=0.9)
+        )
+
+        self.ax.set_title('2D Free Fall Trajectory (Ideal Projectile Motion)', fontsize=13, pad=12)
+        self.ax.set_xlabel('Horizontal Distance $x$ (m)')
+        self.ax.set_ylabel('Vertical Height $y$ (m)')
+        self.ax.grid(True, linestyle='--', alpha=0.25)
+        self.ax.set_aspect('equal', adjustable='datalim')
+
+        self._setup_widgets()
+        self.update(None)
+
+    def _setup_widgets(self):
+        slider_color = '#1e293b'
+        
+        # Slider axes positions [left, bottom, width, height]
+        ax_v0 = plt.axes([0.22, 0.23, 0.55, 0.03], facecolor=slider_color)
+        ax_ang = plt.axes([0.22, 0.18, 0.55, 0.03], facecolor=slider_color)
+        ax_h0 = plt.axes([0.22, 0.13, 0.55, 0.03], facecolor=slider_color)
+        ax_g = plt.axes([0.22, 0.08, 0.55, 0.03], facecolor=slider_color)
+
+        self.s_v0 = Slider(ax_v0, 'Velocity $v_0$ (m/s)', 1.0, 100.0, valinit=self.v0, valstep=0.5, color='#38bdf8')
+        self.s_ang = Slider(ax_ang, 'Angle $\\theta$ (deg)', -85.0, 90.0, valinit=self.angle, valstep=1.0, color='#38bdf8')
+        self.s_h0 = Slider(ax_h0, 'Height $h_0$ (m)', 0.0, 100.0, valinit=self.h0, valstep=0.5, color='#38bdf8')
+        self.s_g = Slider(ax_g, 'Gravity $g$ (m/s²)', 1.62, 24.79, valinit=self.g, valstep=0.01, color='#38bdf8')
+
+        for s in (self.s_v0, self.s_ang, self.s_h0, self.s_g):
+            s.on_changed(self.update)
+
+        # Checkbutton for keeping trails
+        ax_check = plt.axes([0.81, 0.16, 0.15, 0.10], frameon=False)
+        self.check = CheckButtons(ax_check, ['Keep Trails'], [False])
+        self.check.on_clicked(self.toggle_trails)
+
+        # Save Snapshot & Clear buttons
+        ax_save = plt.axes([0.81, 0.11, 0.14, 0.045])
+        self.btn_save = Button(ax_save, 'Pin Curve', color='#334155', hovercolor='#475569')
+        self.btn_save.on_clicked(self.pin_curve)
+
+        ax_clear = plt.axes([0.81, 0.055, 0.14, 0.045])
+        self.btn_clear = Button(ax_clear, 'Clear Trails', color='#334155', hovercolor='#475569')
+        self.btn_clear.on_clicked(self.clear_trails)
+
+    def calculate_kinematics(self, v0, angle_deg, h0, g):
+        theta = np.radians(angle_deg)
+        vx = v0 * np.cos(theta)
+        vy = v0 * np.sin(theta)
+
+        # Flight time until y = 0
+        discriminant = vy**2 + 2 * g * h0
+        total_time = (vy + np.sqrt(discriminant)) / g
+
+        t = np.linspace(0, total_time, 200)
+        x = vx * t
+        y = np.maximum(0, h0 + vy * t - 0.5 * g * t**2)
+
+        # Peak coordinates
+        t_peak = max(0.0, vy / g)
+        x_peak = vx * t_peak
+        y_peak = h0 + vy * t_peak - 0.5 * g * t_peak**2
+
+        # Final impact speed
+        vy_final = vy - g * total_time
+        v_impact = np.hypot(vx, vy_final)
+
+        return x, y, x_peak, y_peak, total_time, v_impact
+
+    def update(self, _):
+        # If "Keep Trails" is checked, save the previous curve before updating
+        if self.keep_trails and len(self.active_line.get_xdata()) > 0:
+            self.pin_curve(None)
+
+        v0 = self.s_v0.val
+        angle = self.s_ang.val
+        h0 = self.s_h0.val
+        g = self.s_g.val
+
+        x, y, x_peak, y_peak, total_time, v_impact = self.calculate_kinematics(v0, angle, h0, g)
+
+        self.active_line.set_data(x, y)
+        self.launch_marker.set_data([0], [h0])
+        self.apex_marker.set_data([x_peak], [y_peak])
+
+        # Update telemetry readout
+        self.telemetry_text.set_text(
+            f"Range (R):     {x[-1]:.2f} m\n"
+            f"Max Height:    {y_peak:.2f} m\n"
+            f"Flight Time:   {total_time:.2f} s\n"
+            f"Impact Speed:  {v_impact:.2f} m/s"
+        )
+
+        # Auto-scale axes cleanly across active + saved curves
+        all_x = [x] + [line.get_xdata() for line in self.saved_lines]
+        all_y = [y] + [line.get_ydata() for line in self.saved_lines]
+
+        max_x = max(10.0, max(np.max(arr) for arr in all_x) * 1.1)
+        max_y = max(10.0, max(np.max(arr) for arr in all_y) * 1.15)
+
+        self.ax.set_xlim(0, max_x)
+        self.ax.set_ylim(0, max_y)
+        self.fig.canvas.draw_idle()
+
+    def toggle_trails(self, _):
+        self.keep_trails = not self.keep_trails
+
+    def pin_curve(self, _):
+        x = self.active_line.get_xdata()
+        y = self.active_line.get_ydata()
+        if len(x) == 0:
+            return
+        color = self.colors[self.color_idx % len(self.colors)]
+        self.color_idx += 1
+        line, = self.ax.plot(x, y, '--', color=color, lw=1.5, alpha=0.8)
+        self.saved_lines.append(line)
+        self.fig.canvas.draw_idle()
+
+    def clear_trails(self, _):
+        for line in self.saved_lines:
+            line.remove()
+        self.saved_lines.clear()
+        self.update(None)
+
+if __name__ == '__main__':
+    sim = TrajectorySimulator()
+    plt.show()
