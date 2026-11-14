@@ -5,7 +5,6 @@ import altair as alt
 
 st.set_page_config(page_title="2D Free Fall Trajectory Simulator", layout="wide")
 
-# Initialize session state for pinned comparison trails
 if "pinned_trails" not in st.session_state:
     st.session_state.pinned_trails = []
 
@@ -28,7 +27,6 @@ def calculate_ideal(v0: float, angle_deg: float, h0: float, g: float, num_points
     vy = vy0 - g * t
     speed = np.hypot(vx, vy)
 
-    # Apex
     t_peak = max(0.0, vy0 / g)
     x_peak = vx0 * t_peak
     y_peak = h0 + vy0 * t_peak - 0.5 * g * t_peak**2
@@ -126,7 +124,6 @@ def calculate_with_drag(
     }
 
 
-# --- Sidebar Controls ---
 st.sidebar.header("Launch Parameters")
 
 v0 = st.sidebar.slider("Initial Velocity v₀ (m/s)", min_value=1.0, max_value=100.0, value=30.0, step=0.5)
@@ -146,7 +143,6 @@ if planet_presets[preset] is not None:
 else:
     g = st.sidebar.slider("Custom Gravity g (m/s²)", min_value=0.5, max_value=30.0, value=9.81, step=0.01)
 
-# --- Optional Air Resistance ---
 st.sidebar.divider()
 enable_drag = st.sidebar.checkbox("Enable Air Resistance (Quadratic Drag)", value=False)
 
@@ -157,7 +153,6 @@ if enable_drag:
     rho = st.sidebar.number_input("Air Density ρ (kg/m³)", min_value=0.0, max_value=5.0, value=1.225, step=0.05)
     area = np.pi * ((diameter_cm / 100.0) / 2.0) ** 2
 
-# Compute Trajectories
 ideal_traj = calculate_ideal(v0, angle, h0, g)
 
 if enable_drag:
@@ -167,7 +162,6 @@ else:
     active_traj = ideal_traj
     active_label = f"Active (v₀={v0}, θ={angle}°, h₀={h0}m)"
 
-# --- Trail Management & Export ---
 st.sidebar.divider()
 col_pin, col_clear = st.sidebar.columns(2)
 if col_pin.button("Pin Curve", use_container_width=True):
@@ -188,7 +182,6 @@ if col_pin.button("Pin Curve", use_container_width=True):
 if col_clear.button("Clear Trails", use_container_width=True):
     st.session_state.pinned_trails = []
 
-# CSV Export
 df_export = pd.DataFrame(
     {
         "time_s": active_traj["t"],
@@ -207,10 +200,8 @@ st.sidebar.download_button(
     use_container_width=True,
 )
 
-# --- Main Display ---
 st.title("2D Free Fall Trajectory Simulator")
 
-# Live Kinematic Metrics Row
 m1, m2, m3, m4 = st.columns(4)
 m1.metric(
     "Max Range (R)",
@@ -233,7 +224,6 @@ m4.metric(
     delta=f"{active_traj['v_impact'] - ideal_traj['v_impact']:.2f} m/s vs vacuum" if enable_drag else None,
 )
 
-# Time Scrubber to inspect projectile position along flight
 t_scrub = st.slider(
     "Inspect Projectile at Time t (s)",
     min_value=0.0,
@@ -243,7 +233,6 @@ t_scrub = st.slider(
 )
 scrub_idx = int(np.argmin(np.abs(active_traj["t"] - t_scrub)))
 
-# Build unified dataframe for Altair
 frames_list = [
     pd.DataFrame(
         {
@@ -294,11 +283,9 @@ for trail in st.session_state.pinned_trails:
 
 plot_df = pd.concat(frames_list, ignore_index=True)
 
-# Unified axis bounds so 1:1 aspect ratio renders accurately
 all_trajs = st.session_state.pinned_trails + [active_traj, ideal_traj]
 max_bound = max(10.0, max(t["range"] for t in all_trajs) * 1.1, max(t["y_peak"] for t in all_trajs) * 1.15)
 
-# Trajectory curves layer
 lines_chart = (
     alt.Chart(plot_df)
     .mark_line(strokeWidth=3)
@@ -325,7 +312,6 @@ lines_chart = (
     )
 )
 
-# Markers layer (Projectile position + Apex)
 markers_df = pd.DataFrame(
     [
         {
