@@ -15,9 +15,8 @@ def add_vector_arrow(fig, start, vec, color, name, scale=1.0):
 
     scaled_vec = vec * scale
     end = start + scaled_vec
-    tip_dir = scaled_vec * 0.22  # Cone length proportional to vector
+    tip_dir = scaled_vec * 0.22
 
-    # Vector shaft
     fig.add_trace(
         go.Scatter3d(
             x=[start[0], end[0]],
@@ -34,7 +33,6 @@ def add_vector_arrow(fig, start, vec, color, name, scale=1.0):
         )
     )
 
-    # Arrowhead cone
     fig.add_trace(
         go.Cone(
             x=[end[0]],
@@ -61,11 +59,9 @@ def build_plane_mesh(A, B, C, D, center, half_span):
     if n_norm_sq < 1e-12:
         return None
 
-    # Project `center` onto the plane so the patch stays framed around the action
     c0 = np.asarray(center, dtype=float)
     p0 = c0 - ((np.dot(n, c0) - D) / n_norm_sq) * n
 
-    # Pick a helper vector not parallel to n to construct orthonormal basis (u, v)
     helper = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 * np.sqrt(n_norm_sq) else np.array([0.0, 1.0, 0.0])
     u = np.cross(n, helper)
     u /= np.linalg.norm(u)
@@ -102,7 +98,7 @@ x0 = col_l0_1.number_input("x₀", value=0.0, step=0.5, format="%.2f")
 y0 = col_l0_2.number_input("y₀", value=0.0, step=0.5, format="%.2f")
 z0 = col_l0_3.number_input("z₀", value=0.0, step=0.5, format="%.2f")
 
-st.sidebar.markdown("**Direction Vector $\\vec{d} = (a, b, c)$**")
+st.sidebar.markdown(r"**Direction Vector $\vec{d} = (a, b, c)$**")
 col_d1, col_d2, col_d3 = st.sidebar.columns(3)
 a = col_d1.number_input("a", value=1.0, step=0.5, format="%.2f")
 b = col_d2.number_input("b", value=2.0, step=0.5, format="%.2f")
@@ -120,7 +116,6 @@ n_vec = np.array([A, B, C], dtype=float)
 d_vec = np.array([a, b, c], dtype=float)
 p_line0 = np.array([x0, y0, z0], dtype=float)
 
-# Validate non-degenerate inputs
 if np.linalg.norm(n_vec) < 1e-12:
     st.error("Invalid plane: Normal vector (A, B, C) cannot be (0, 0, 0).")
     st.stop()
@@ -129,15 +124,12 @@ if np.linalg.norm(d_vec) < 1e-12:
     st.error("Invalid line: Direction vector (a, b, c) cannot be (0, 0, 0).")
     st.stop()
 
-# Solve A(x0 + a*k) + B(y0 + b*k) + C(z0 + c*k) = D
 denom = float(np.dot(n_vec, d_vec))
 rhs = float(D - np.dot(n_vec, p_line0))
 
-# Angle between line and plane: sin(alpha) = |n · d| / (||n|| ||d||)
 cos_theta = np.clip(abs(denom) / (np.linalg.norm(n_vec) * np.linalg.norm(d_vec)), 0.0, 1.0)
 angle_deg = float(np.degrees(np.arcsin(cos_theta)))
 
-# Determine intersection case
 if abs(denom) > 1e-10:
     case = "unique"
     k_star = rhs / denom
@@ -157,7 +149,6 @@ else:
     status_title = "Parallel (No Intersection)"
     status_detail = "0 intersection points (n · d = 0 and Ax₀ + By₀ + Cz₀ ≠ D)"
 
-# Top Summary Banner & Metrics
 if case == "unique":
     st.success(f"**{status_title}:** `{status_detail}`")
 elif case == "contained":
@@ -171,7 +162,6 @@ m2.metric("Direction Vector d", f"({a:g}, {b:g}, {c:g})")
 m3.metric("Dot Product (n · d)", f"{denom:.3f}")
 m4.metric("Angle (Line to Plane)", f"{angle_deg:.2f}°")
 
-# Frame the 3D scene around the intersection (if within reasonable range) or base point
 if case == "unique" and abs(k_star) <= k_range * 2.5:
     scene_center = p_int
     k_min = min(-k_range, k_star - 2.0)
@@ -180,21 +170,16 @@ else:
     scene_center = p_line0
     k_min, k_max = -k_range, k_range
 
-# Compute line segment endpoints
 k_vals = np.linspace(k_min, k_max, 100)
 line_pts = p_line0[:, None] + d_vec[:, None] * k_vals[None, :]
 
-# Determine plane half-span dynamically
 line_span = np.linalg.norm(line_pts[:, -1] - line_pts[:, 0]) * 0.55
 half_span = max(6.0, line_span)
 
-plane_mesh = build_plane_mesh(A, B, C, D, scene_center, half_span)
-X_plane, Y_plane, Z_plane, p_plane_anchor = plane_mesh
+X_plane, Y_plane, Z_plane, p_plane_anchor = build_plane_mesh(A, B, C, D, scene_center, half_span)
 
-# --- Build Interactive 3D Plotly Scene ---
 fig = go.Figure()
 
-# 1. Plane Surface
 fig.add_trace(
     go.Surface(
         x=X_plane,
@@ -209,7 +194,6 @@ fig.add_trace(
     )
 )
 
-# 2. Parametric Line
 fig.add_trace(
     go.Scatter3d(
         x=line_pts[0],
@@ -223,7 +207,6 @@ fig.add_trace(
     )
 )
 
-# 3. Line Base Point (x0, y0, z0)
 fig.add_trace(
     go.Scatter3d(
         x=[x0],
@@ -236,7 +219,6 @@ fig.add_trace(
     )
 )
 
-# 4. Intersection Point (if unique)
 if case == "unique":
     fig.add_trace(
         go.Scatter3d(
@@ -256,7 +238,6 @@ if case == "unique":
         )
     )
 
-# 5. Normal Vector n = (A, B, C) anchored on the plane (at intersection if available)
 normal_origin = p_int if case == "unique" else p_plane_anchor
 add_vector_arrow(
     fig,
@@ -267,7 +248,6 @@ add_vector_arrow(
     scale=vec_scale,
 )
 
-# 6. Direction Vector d = (a, b, c) anchored at P0
 add_vector_arrow(
     fig,
     start=p_line0,
@@ -286,19 +266,18 @@ fig.update_layout(
         xaxis_title="X",
         yaxis_title="Y",
         zaxis_title="Z",
-        aspectmode="data",  # Preserves true 3D perpendicularity between n and the plane
+        aspectmode="data",
     ),
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# Expandable Step-by-Step Algebraic Solution for Students
 with st.expander("Show Step-by-Step Algebraic Solution"):
     st.markdown("**1. Substitute the line's parametric equations into the plane equation:**")
     st.latex(
         rf"{A:g}({x0:g} + {a:g}k) + {B:g}({y0:g} + {b:g}k) + {C:g}({z0:g} + {c:g}k) = {D:g}"
     )
-    st.markdown("**2. Group constant terms and $k$-terms ($\vec{n}\cdot\vec{d}\,k = D - \vec{n}\cdot P_0$):**")
+    st.markdown(r"**2. Group constant terms and $k$-terms ($\vec{n}\cdot\vec{d}\,k = D - \vec{n}\cdot P_0$):**")
     st.latex(rf"({denom:g})k = {rhs:g}")
     if case == "unique":
         st.markdown("**3. Solve for $k$ and substitute back into $L(k)$:**")
@@ -307,6 +286,6 @@ with st.expander("Show Step-by-Step Algebraic Solution"):
             rf"P = \left({x0:g} + ({a:g})({k_star:.4f}),\; {y0:g} + ({b:g})({k_star:.4f}),\; {z0:g} + ({c:g})({k_star:.4f})\right) = ({p_int[0]:.4f},\; {p_int[1]:.4f},\; {p_int[2]:.4f})"
         )
     elif case == "contained":
-        st.markdown("**3. Result:** $0 \cdot k = 0$ holds for every $k \in \mathbb{R}$, so the entire line lies on the plane.")
+        st.markdown(r"**3. Result:** $0 \cdot k = 0$ holds for every $k \in \mathbb{R}$, so the entire line lies on the plane.")
     else:
-        st.markdown(f"**3. Result:** $0 \cdot k = {rhs:g}$ has no solution, so the line is strictly parallel to the plane.")
+        st.markdown(rf"**3. Result:** $0 \cdot k = {rhs:g}$ has no solution, so the line is strictly parallel to the plane.")
