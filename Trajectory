@@ -1,10 +1,7 @@
-pip install streamlit numpy pandas plotly
-streamlit run app.py
-
 import streamlit as st
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import altair as alt
 
 st.set_page_config(page_title="2D Free Fall Trajectory Simulator", layout="wide")
 
@@ -43,8 +40,8 @@ def calculate_ideal(v0: float, angle_deg: float, h0: float, g: float, num_points
         "vx": vx,
         "vy": vy,
         "speed": speed,
-        "x_peak": x_peak,
-        "y_peak": y_peak,
+        "x_peak": float(x_peak),
+        "y_peak": float(y_peak),
         "range": float(x[-1]),
         "total_time": float(total_time),
         "v_impact": float(speed[-1]),
@@ -78,7 +75,6 @@ def calculate_with_drag(
 
     ts, xs, ys, vxs, vys = [t], [x], [y], [vx], [vy]
 
-    # Integrate until projectile hits y <= 0 (with safety cap of 100,000 steps)
     for _ in range(100_000):
         dx1, dy1, dvx1, dvy1 = derivatives(vx, vy)
         dx2, dy2, dvx2, dvy2 = derivatives(vx + 0.5 * dt * dvx1, vy + 0.5 * dt * dvy1)
@@ -92,18 +88,12 @@ def calculate_with_drag(
         t_next = t + dt
 
         if y_next <= 0.0 and t > 0:
-            # Linear interpolation for exact ground impact
             frac = y / (y - y_next) if (y - y_next) != 0 else 1.0
-            x_impact = x + frac * (x_next - x)
-            t_impact = t + frac * dt
-            vx_impact = vx + frac * (vx_next - vx)
-            vy_impact = vy + frac * (vy_next - vy)
-
-            ts.append(t_impact)
-            xs.append(x_impact)
+            ts.append(t + frac * dt)
+            xs.append(x + frac * (x_next - x))
             ys.append(0.0)
-            vxs.append(vx_impact)
-            vys.append(vy_impact)
+            vxs.append(vx + frac * (vx_next - vx))
+            vys.append(vy + frac * (vy_next - vy))
             break
 
         x, y, vx, vy, t = x_next, y_next, vx_next, vy_next, t_next
@@ -119,7 +109,6 @@ def calculate_with_drag(
     vx_arr = np.array(vxs)
     vy_arr = np.array(vys)
     speed_arr = np.hypot(vx_arr, vy_arr)
-
     peak_idx = int(np.argmax(y_arr))
 
     return {
@@ -173,10 +162,10 @@ ideal_traj = calculate_ideal(v0, angle, h0, g)
 
 if enable_drag:
     active_traj = calculate_with_drag(v0, angle, h0, g, mass, cd, area, rho)
-    active_label = f"Drag: v₀={v0}m/s, θ={angle}°, h₀={h0}m"
+    active_label = f"Active (Drag: v₀={v0}, θ={angle}°, h₀={h0}m)"
 else:
     active_traj = ideal_traj
-    active_label = f"Ideal: v₀={v0}m/s, θ={angle}°, h₀={h0}m"
+    active_label = f"Active (v₀={v0}, θ={angle}°, h₀={h0}m)"
 
 # --- Trail Management & Export ---
 st.sidebar.divider()
@@ -187,9 +176,11 @@ if col_pin.button("Pin Curve", use_container_width=True):
         {
             "x": active_traj["x"],
             "y": active_traj["y"],
+            "t": active_traj["t"],
+            "speed": active_traj["speed"],
             "range": active_traj["range"],
             "y_peak": active_traj["y_peak"],
-            "label": active_label,
+            "label": f"Pinned #{len(st.session_state.pinned_trails) + 1}: v₀={v0}, θ={angle}°, h₀={h0}m",
             "color": color,
         }
     )
@@ -219,7 +210,7 @@ st.sidebar.download_button(
 # --- Main Display ---
 st.title("2D Free Fall Trajectory Simulator")
 
-# Live Kinematic Metrics Row (with delta vs ideal when drag is enabled)
+# Live Kinematic Metrics Row
 m1, m2, m3, m4 = st.columns(4)
 m1.metric(
     "Max Range (R)",
@@ -242,150 +233,133 @@ m4.metric(
     delta=f"{active_traj['v_impact'] - ideal_traj['v_impact']:.2f} m/s vs vacuum" if enable_drag else None,
 )
 
-# --- Build Plotly Figure with Animation Frames ---
-fig = go.Figure()
-
-# Trace 0: Animated Projectile Marker (updated by frames)
-fig.add_trace(
-    go.Scatter(
-        x=[active_traj["x"][0]],
-        y=[active_traj["y"][0]],
-        mode="markers",
-        name="Projectile",
-        marker=dict(color="#f8fafc", size=12, line=dict(color="#38bdf8", width=2.5)),
-        hoverinfo="skip",
-    )
+# Time Scrubber to inspect projectile position along flight
+t_scrub = st.slider(
+    "Inspect Projectile at Time t (s)",
+    min_value=0.0,
+    max_value=float(active_traj["total_time"]),
+    value=0.0,
+    step=max(0.01, round(active_traj["total_time"] / 100.0, 2)),
 )
+scrub_idx = int(np.argmin(np.abs(active_traj["t"] - t_scrub)))
 
-# Trace 1: Active Trajectory Path
-fig.add_trace(
-    go.Scatter(
-        x=active_traj["x"],
-        y=active_traj["y"],
-        mode="lines",
-        name=active_label,
-        line=dict(color="#38bdf8", width=3.5),
-        customdata=np.column_stack((active_traj["t"], active_traj["speed"])),
-        hovertemplate="x: %{x:.2f} m<br>y: %{y:.2f} m<br>t: %{customdata[0]:.2f} s<br>v: %{customdata[1]:.2f} m/s<extra></extra>",
+# Build unified dataframe for Altair
+frames_list = [
+    pd.DataFrame(
+        {
+            "x": active_traj["x"],
+            "y": active_traj["y"],
+            "t": active_traj["t"],
+            "speed": active_traj["speed"],
+            "Series": active_label,
+            "Style": "solid",
+        }
     )
-)
+]
 
-# Trace 2: Ideal Vacuum Reference Curve (if drag is active)
+domain = [active_label]
+range_colors = ["#38bdf8"]
+
 if enable_drag:
-    fig.add_trace(
-        go.Scatter(
-            x=ideal_traj["x"],
-            y=ideal_traj["y"],
-            mode="lines",
-            name="Ideal Vacuum Reference",
-            line=dict(color="#94a3b8", width=2, dash="dot"),
-            hovertemplate="Vacuum x: %{x:.2f} m<br>y: %{y:.2f} m<extra></extra>",
+    frames_list.append(
+        pd.DataFrame(
+            {
+                "x": ideal_traj["x"],
+                "y": ideal_traj["y"],
+                "t": ideal_traj["t"],
+                "speed": ideal_traj["speed"],
+                "Series": "Ideal Vacuum Reference",
+                "Style": "dashed",
+            }
         )
     )
+    domain.append("Ideal Vacuum Reference")
+    range_colors.append("#94a3b8")
 
-# Apex Marker
-fig.add_trace(
-    go.Scatter(
-        x=[active_traj["x_peak"]],
-        y=[active_traj["y_peak"]],
-        mode="markers",
-        name="Apex",
-        marker=dict(symbol="triangle-up", color="#fbbf24", size=11),
-        hovertemplate=f"Apex: ({active_traj['x_peak']:.2f} m, {active_traj['y_peak']:.2f} m)<extra></extra>",
-    )
-)
-
-# Pinned Comparison Trails
-for idx, trail in enumerate(st.session_state.pinned_trails):
-    fig.add_trace(
-        go.Scatter(
-            x=trail["x"],
-            y=trail["y"],
-            mode="lines",
-            name=f"#{idx + 1}: {trail['label']}",
-            line=dict(color=trail["color"], width=2, dash="dash"),
-            hovertemplate="x: %{x:.2f} m<br>y: %{y:.2f} m<extra></extra>",
+for trail in st.session_state.pinned_trails:
+    frames_list.append(
+        pd.DataFrame(
+            {
+                "x": trail["x"],
+                "y": trail["y"],
+                "t": trail["t"],
+                "speed": trail["speed"],
+                "Series": trail["label"],
+                "Style": "dashed",
+            }
         )
     )
+    domain.append(trail["label"])
+    range_colors.append(trail["color"])
 
-# Build ~50 evenly spaced animation frames for smooth playback
-frame_indices = np.linspace(0, len(active_traj["x"]) - 1, min(50, len(active_traj["x"])), dtype=int)
-frames = []
-slider_steps = []
+plot_df = pd.concat(frames_list, ignore_index=True)
 
-for idx in frame_indices:
-    t_val = active_traj["t"][idx]
-    frame_name = f"{t_val:.2f}s"
-    frames.append(
-        go.Frame(
-            data=[go.Scatter(x=[active_traj["x"][idx]], y=[active_traj["y"][idx]])],
-            traces=[0],
-            name=frame_name,
-        )
-    )
-    slider_steps.append(
-        {
-            "args": [[frame_name], {"frame": {"duration": 25, "redraw": False}, "mode": "immediate"}],
-            "label": frame_name,
-            "method": "animate",
-        }
-    )
-
-fig.frames = frames
-
-# Unified axis bounds for 1:1 geometric aspect ratio
+# Unified axis bounds so 1:1 aspect ratio renders accurately
 all_trajs = st.session_state.pinned_trails + [active_traj, ideal_traj]
-max_x = max(10.0, max(t["range"] for t in all_trajs) * 1.1)
-max_y = max(10.0, max(t["y_peak"] for t in all_trajs) * 1.15)
+max_bound = max(10.0, max(t["range"] for t in all_trajs) * 1.1, max(t["y_peak"] for t in all_trajs) * 1.15)
 
-fig.update_layout(
-    template="plotly_dark",
-    height=600,
-    margin=dict(l=40, r=20, t=40, b=80),
-    xaxis=dict(title="Horizontal Distance x (m)", range=[0, max_x], zeroline=True),
-    yaxis=dict(
-        title="Vertical Height y (m)",
-        range=[0, max_y],
-        scaleanchor="x",
-        scaleratio=1,
-        zeroline=True,
-    ),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    updatemenus=[
-        {
-            "type": "buttons",
-            "showactive": False,
-            "x": 0.0,
-            "y": -0.18,
-            "xanchor": "left",
-            "yanchor": "top",
-            "buttons": [
-                {
-                    "label": "▶ Play",
-                    "method": "animate",
-                    "args": [None, {"frame": {"duration": 25, "redraw": False}, "fromcurrent": True}],
-                },
-                {
-                    "label": "⏸ Pause",
-                    "method": "animate",
-                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
-                },
-            ],
-        }
-    ],
-    sliders=[
-        {
-            "active": 0,
-            "yanchor": "top",
-            "xanchor": "left",
-            "currentvalue": {"prefix": "Time: ", "visible": True, "xanchor": "right"},
-            "pad": {"b": 10, "t": 35},
-            "len": 0.82,
-            "x": 0.18,
-            "y": -0.12,
-            "steps": slider_steps,
-        }
-    ],
+# Trajectory curves layer
+lines_chart = (
+    alt.Chart(plot_df)
+    .mark_line(strokeWidth=3)
+    .encode(
+        x=alt.X("x:Q", title="Horizontal Distance x (m)", scale=alt.Scale(domain=[0, max_bound])),
+        y=alt.Y("y:Q", title="Vertical Height y (m)", scale=alt.Scale(domain=[0, max_bound])),
+        color=alt.Color(
+            "Series:N",
+            scale=alt.Scale(domain=domain, range=range_colors),
+            legend=alt.Legend(orient="top", title=None),
+        ),
+        strokeDash=alt.condition(
+            alt.datum.Style == "dashed",
+            alt.value([6, 4]),
+            alt.value([1, 0]),
+        ),
+        tooltip=[
+            alt.Tooltip("Series:N", title="Trajectory"),
+            alt.Tooltip("x:Q", title="x (m)", format=".2f"),
+            alt.Tooltip("y:Q", title="y (m)", format=".2f"),
+            alt.Tooltip("t:Q", title="Time (s)", format=".2f"),
+            alt.Tooltip("speed:Q", title="Speed (m/s)", format=".2f"),
+        ],
+    )
 )
 
-st.plotly_chart(fig, use_container_width=True)
+# Markers layer (Projectile position + Apex)
+markers_df = pd.DataFrame(
+    [
+        {
+            "x": float(active_traj["x"][scrub_idx]),
+            "y": float(active_traj["y"][scrub_idx]),
+            "Point": f"Projectile (t={active_traj['t'][scrub_idx]:.2f}s)",
+            "color": "#f8fafc",
+            "shape": "circle",
+        },
+        {
+            "x": active_traj["x_peak"],
+            "y": active_traj["y_peak"],
+            "Point": f"Apex ({active_traj['x_peak']:.2f}m, {active_traj['y_peak']:.2f}m)",
+            "color": "#fbbf24",
+            "shape": "triangle-up",
+        },
+    ]
+)
+
+markers_chart = (
+    alt.Chart(markers_df)
+    .mark_point(size=140, filled=True, stroke="#38bdf8", strokeWidth=2)
+    .encode(
+        x="x:Q",
+        y="y:Q",
+        color=alt.Color("color:N", scale=None),
+        shape=alt.Shape("shape:N", scale=None),
+        tooltip=[
+            alt.Tooltip("Point:N", title="Marker"),
+            alt.Tooltip("x:Q", title="x (m)", format=".2f"),
+            alt.Tooltip("y:Q", title="y (m)", format=".2f"),
+        ],
+    )
+)
+
+combined_chart = (lines_chart + markers_chart).properties(height=550).interactive()
+st.altair_chart(combined_chart, use_container_width=True)
